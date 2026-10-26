@@ -1,15 +1,23 @@
 import { PlaywrightCrawler, Dataset } from 'crawlee';
 import * as fs from 'fs';
 
-const CATEGORIES = [
-  { name: 'pralki', url: 'https://www.mediaexpert.pl/agd/pralki-i-suszarki/pralki' },
-  { name: 'zmywarki', url: 'https://www.mediaexpert.pl/agd/zmywarki/zmywarki' },
-  { name: 'lodowki', url: 'https://www.mediaexpert.pl/agd/lodowki/lodowki' },
-  { name: 'kuchnie', url: 'https://www.mediaexpert.pl/agd/kuchnie/kuchnie' },
-  { name: 'mikrofale', url: 'https://www.mediaexpert.pl/agd/mikrofale/mikrofale' },
-  { name: 'okapy', url: 'https://www.mediaexpert.pl/agd/okapy/okapy' },
-  { name: 'suszarki', url: 'https://www.mediaexpert.pl/agd/suszarki/suszarki' },
+const SHOPS = [
+  { name: 'mediaexpert.pl', baseUrl: 'https://www.mediaexpert.pl/agd' },
+  { name: 'mediamarkt.pl', baseUrl: 'https://www.mediamarkt.pl/pl/assortment' },
+  { name: 'euro.com.pl', baseUrl: 'https://www.euro.com.pl/agd' },
 ];
+
+const CATEGORIES = [
+  { name: 'pralki', slug: 'pralki-i-suszarki/pralki' },
+  { name: 'zmywarki', slug: 'zmywarki/zmywarki' },
+  { name: 'lodowki', slug: 'lodowki/lodowki' },
+  { name: 'kuchnie', slug: 'kuchnie/kuchnie' },
+  { name: 'mikrofale', slug: 'mikrofale/mikrofale' },
+  { name: 'okapy', slug: 'okapy/okapy' },
+  { name: 'suszarki', slug: 'suszarki/suszarki' },
+];
+
+const BRANDS_TO_TRACK = ['BOSCH', 'SIEMENS', 'ELECTROLUX', 'SAMSUNG', 'LG'];
 
 const PRODUCT_PREFIX = {
   pralki: 'Pralka',
@@ -21,6 +29,37 @@ const PRODUCT_PREFIX = {
   suszarki: 'Suszarka',
 };
 
+function buildShopUrls() {
+  const urls = [];
+
+  // MediaExpert URLs
+  CATEGORIES.forEach(cat => {
+    urls.push({
+      url: `https://www.mediaexpert.pl/agd/${cat.slug}`,
+      userData: { category: cat.name, shop: 'mediaexpert.pl' }
+    });
+  });
+
+  // MediaMarkt URLs (simplified category URLs)
+  CATEGORIES.forEach(cat => {
+    const mmCategory = cat.name.replace('lodowki', 'lodówki').replace('okapy', 'okapy');
+    urls.push({
+      url: `https://www.mediamarkt.pl/pl/assortment/${mmCategory}`,
+      userData: { category: cat.name, shop: 'mediamarkt.pl' }
+    });
+  });
+
+  // Euro URLs
+  CATEGORIES.forEach(cat => {
+    urls.push({
+      url: `https://www.euro.com.pl/agd/${cat.slug}`,
+      userData: { category: cat.name, shop: 'euro.com.pl' }
+    });
+  });
+
+  return urls;
+}
+
 const crawler = new PlaywrightCrawler({
   launchContext: {
     launchOptions: {
@@ -28,20 +67,23 @@ const crawler = new PlaywrightCrawler({
       args: ['--disable-blink-features=AutomationControlled'],
     },
   },
+  maxConcurrency: 3,
 
   async requestHandler({ request, page, pushData }) {
     const category = request.userData.category;
-    console.log(`[${category}] Processing: ${request.url}`);
+    const shop = request.userData.shop;
+    console.log(`[${shop}/${category}] Processing: ${request.url}`);
 
     await page.waitForLoadState('networkidle').catch(() => {});
 
-    const products = await page.evaluate((categoryName, prefix) => {
+    const products = await page.evaluate((categoryName, prefix, brands) => {
       const items = [];
       const text = document.body.innerText;
+      const brandPattern = brands.join('|');
 
       const productMatches = text.matchAll(
         new RegExp(
-          `${prefix}\\s+(HISENSE|ELECTROLUX|BOSCH|SAMSUNG|LG|CANDY|BEKO|WHIRLPOOL|INDESIT|SIEMENS)[^\\n]*\\n([\\s\\S]*?)(?=${prefix}\\s+(?:HISENSE|ELECTROLUX|BOSCH|SAMSUNG|LG|CANDY|BEKO|WHIRLPOOL|INDESIT|SIEMENS)|$)`,
+          `${prefix}\\s+(${brandPattern})[^\\n]*\\n([\\s\\S]*?)(?=${prefix}\\s+(?:${brandPattern})|$)`,
           'gi'
         )
       );
@@ -78,32 +120,27 @@ const crawler = new PlaywrightCrawler({
             model,
             code,
             price_pln,
-            shop: 'mediaexpert.pl',
           });
         }
       }
 
       return items;
-    }, category, PRODUCT_PREFIX[category]);
+    }, category, PRODUCT_PREFIX[category], BRANDS_TO_TRACK);
 
-    console.log(`[${category}] Found ${products.length} products`);
+    console.log(`[${shop}/${category}] Found ${products.length} products`);
     for (const product of products) {
-      await pushData(product);
+      await pushData({ ...product, shop });
     }
   },
 
   maxRequestRetries: 2,
-  maxRequestsPerCrawl: CATEGORIES.length,
+  maxRequestsPerCrawl: Infinity,
 });
 
-console.log('[START] Scraping all AGD categories from mediaexpert.pl\n');
+console.log('[START] Scraping AGD from 3 shops (mediaexpert, mediamarkt, euro)\n');
 
-await crawler.addRequests(
-  CATEGORIES.map(cat => ({
-    url: cat.url,
-    userData: { category: cat.name },
-  }))
-);
+const urls = buildShopUrls();
+await crawler.addRequests(urls);
 
 await crawler.run();
 
@@ -134,30 +171,36 @@ let html = `<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Raport cen AGD - Media Expert</title>
+    <title>Konkurencja BOSCH/SIEMENS - Raport cen AGD</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; padding: 20px; background: #f5f5f5; }
-        .container { max-width: 1200px; margin: 0 auto; }
+        .container { max-width: 1400px; margin: 0 auto; }
         h1 { color: #1a1a1a; margin-bottom: 10px; }
         .meta { color: #666; font-size: 14px; margin-bottom: 30px; }
+        .brands { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
+        .brand-badge { background: white; padding: 8px 12px; border-radius: 4px; border-left: 3px solid #FFD700; font-size: 12px; }
         .categories { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 40px; }
         .cat-card { background: white; padding: 15px; border-radius: 8px; border-left: 4px solid #FFD700; }
         .cat-name { font-weight: bold; font-size: 14px; color: #333; }
         .cat-count { font-size: 24px; font-weight: bold; color: #d9534f; margin: 10px 0; }
         .cat-stats { font-size: 12px; color: #666; line-height: 1.6; }
-        table { width: 100%; border-collapse: collapse; background: white; border-radius: 8px; margin-top: 20px; }
-        th { background: #FFD700; padding: 12px; text-align: left; font-weight: bold; }
-        td { padding: 12px; border-bottom: 1px solid #eee; }
+        table { width: 100%; border-collapse: collapse; background: white; border-radius: 8px; margin-top: 20px; font-size: 13px; }
+        th { background: #FFD700; padding: 10px; text-align: left; font-weight: bold; }
+        td { padding: 10px; border-bottom: 1px solid #eee; }
         tr:hover { background: #f9f9f9; }
         .price { color: #d9534f; font-weight: bold; }
-        .category-label { font-size: 11px; background: #f0f0f0; padding: 4px 8px; border-radius: 4px; }
+        .shop-label { font-size: 10px; background: #f0f0f0; padding: 3px 6px; border-radius: 3px; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>📊 Raport cen AGD - Media Expert</h1>
-        <div class="meta">Wygenerowano: ${new Date().toLocaleString('pl-PL')} | Produkty: ${products.length}</div>
+        <h1>🏭 Konkurencja BOSCH/SIEMENS - Raport cen AGD</h1>
+        <div class="meta">Wygenerowano: ${new Date().toLocaleString('pl-PL')} | Produkty: ${products.length} | Sklepy: mediaexpert.pl, mediamarkt.pl, euro.com.pl</div>
+
+        <div class="brands">
+          ${BRANDS_TO_TRACK.map(b => `<div class="brand-badge"><strong>${b}</strong></div>`).join('')}
+        </div>
 
         <h2>Podsumowanie kategorii</h2>
         <div class="categories">
@@ -185,11 +228,11 @@ html += `
         <table>
             <thead>
                 <tr>
+                    <th>Sklep</th>
                     <th>Kategoria</th>
                     <th>Marka</th>
                     <th>Model</th>
                     <th>Cena (zł)</th>
-                    <th>Kod</th>
                 </tr>
             </thead>
             <tbody>
@@ -198,11 +241,11 @@ html += `
 products.forEach(p => {
   html += `
                 <tr>
-                    <td><span class="category-label">${p.category}</span></td>
+                    <td><span class="shop-label">${p.shop}</span></td>
+                    <td><span class="shop-label">${p.category}</span></td>
                     <td><strong>${p.brand}</strong></td>
-                    <td>${p.model.substring(0, 60)}</td>
+                    <td>${p.model.substring(0, 50)}</td>
                     <td class="price">${p.price_pln.toFixed(2)}</td>
-                    <td>${p.code || '-'}</td>
                 </tr>
 `;
 });
